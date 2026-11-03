@@ -109,16 +109,16 @@ jobs:
         run: |
           set -euo pipefail
           DEB=$(ls packages/*.deb | head -1)
-          BASE=$(basename "$DEB" .deb)
-          SUFFIX="${{ matrix.suffix }}"
-          OUT="${BASE}${SUFFIX}.deb"
-          if [ "$OUT" != "$(basename "$DEB")" ]; then
-            cp "$DEB" "packages/$OUT"
-            echo "renamed: $(basename "$DEB") -> $OUT"
-          else
-            echo "no suffix, keeping: $OUT"
+          VARIANT="${{ matrix.variant }}"
+          # 统一命名：com.rna.album12123_1.0.0_roothide-<variant>.deb
+          VER=$(dpkg-deb -f "$DEB" Version 2>/dev/null || echo "1.0.0")
+          PKG=$(dpkg-deb -f "$DEB" Package 2>/dev/null || echo "com.rna.album12123")
+          OUT="${PKG}_${VER}_roothide-${VARIANT}.deb"
+          echo "original: $(basename "$DEB")"
+          echo "target  : $OUT"
+          if [ "$(basename "$DEB")" != "$OUT" ]; then
+            mv "$DEB" "packages/$OUT"
           fi
-          # 只保留目标文件，其余删除，避免 release 阶段重复上传
           find packages -maxdepth 1 -name '*.deb' ! -name "$OUT" -delete
           ls -lh packages/
           test -f "packages/$OUT"
