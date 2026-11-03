@@ -1,0 +1,113 @@
+name: Build Tweak
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Compile & Package
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner info
+        run: |
+          sw_vers
+          xcode-select -p || true
+          uname -m
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+          export THEOS=$RUNNER_TEMP/theos
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Install iOS SDK
+        run: |
+          set -euo pipefail
+          SDK_SRC=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs
+          mkdir -p "$THEOS/sdks"
+          ls "$SDK_SRC"
+          for s in "$SDK_SRC"/iPhoneOS*.sdk; do
+            echo "copying $s"
+            cp -R "$s" "$THEOS/sdks/"
+          done
+          ls -1 "$THEOS/sdks"
+
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          brew install dpkg ldid
+          dpkg-deb --version | head -1
+          ldid -h 2>&1 | head -1 || true
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          make clean || true
+          make 2>&1 | tee build.log
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          make package FINALPACKAGE=1 2>&1 | tee package.log
+          ls -lh packages/
+
+      - name: Verify package
+        run: |
+          set -euo pipefail
+          DEB=$(ls packages/*.deb | head -1)
+          echo "DEB=$DEB"
+          echo "=== arch ==="
+          dpkg-deb -f "$DEB" Architecture
+          dpkg-deb -f "$DEB" Package
+          dpkg-deb -f "$DEB" Version
+          echo "=== contents ==="
+          dpkg-deb -c "$DEB"
+          echo "=== dylib archs ==="
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          dpkg-deb -x "$DEB" /tmp/x
+          find /tmp/x -name '*.dylib' -exec file {} \;
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ github.sha }}
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.sha }}
+          path: |
+            build.log
+            package.log
+          if-no-files-found: ignore
+
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.deb
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
