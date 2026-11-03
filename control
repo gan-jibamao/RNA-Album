@@ -2,7 +2,7 @@ Package: com.rna.album12123
 Name: RNA-Album (12123 相机相册入口)
 Version: 6.0.0
 Architecture: iphoneos-arm64
-Description: 在交管12123「一键挪车」拍照界面叠加相册入口。修复: 原先误用 arm64e，App 主程序为 thin arm64 导致 dylib 无法加载。
+Description: 交管12123 一键挪车拍照页相册入口。v6 移除高层级 UIWindow（曾导致相机无法打开），诊断改走剪贴板静默复制。
 Maintainer: RNA
 Author: RNA
 Section: Tweaks
