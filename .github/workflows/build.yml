@@ -48,13 +48,17 @@ jobs:
           echo "VARIANT=${{ matrix.variant }}"
           echo "ARCHS=${{ matrix.archs }}"
 
-      - name: Install Theos
+      - name: Install Theos (roothide fork)
         run: |
           set -euo pipefail
           export THEOS=$RUNNER_TEMP/theos
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
           echo "$THEOS/bin" >> "$GITHUB_PATH"
+          echo "=== scheme 可用性 ==="
+          ls "$THEOS/makefiles/package/" || true
+          echo "=== theos 版本 ==="
+          git -C "$THEOS" log -1 --format='%h %s'
 
       - name: Install iOS SDK
         run: |
@@ -67,6 +71,20 @@ jobs:
             cp -R "$s" "$THEOS/sdks/"
           done
           ls -1 "$THEOS/sdks"
+
+      - name: Ensure roothide headers
+        run: |
+          set -euo pipefail
+          echo "=== 检查 theos 是否自带 roothide.h ==="
+          FOUND=$(find "$THEOS" -name 'roothide.h' 2>/dev/null | head -3 || true)
+          if [ -n "$FOUND" ]; then
+            echo "found in theos:"; echo "$FOUND"
+          else
+            echo "not bundled, cloning roothide/libroothide"
+            git clone --recursive --depth 1 https://github.com/roothide/libroothide.git "$RUNNER_TEMP/libroothide"
+            find "$RUNNER_TEMP/libroothide" -name 'roothide.h' | head -5
+            echo "LIBROOTHIDE=$RUNNER_TEMP/libroothide" >> "$GITHUB_ENV"
+          fi
 
       - name: Install packaging tools
         run: |
@@ -174,6 +192,27 @@ jobs:
             [ "$COUNT" = "2" ] || { echo "FAIL: universal variant must be fat with 2 archs"; exit 1; }
             echo "OK: fat dual-arch"
           fi
+
+      - name: Assert roothide layout
+        run: |
+          set -euo pipefail
+          DEB="$ARTIFACT"
+          echo "=== 包内路径 ==="
+          dpkg-deb -c "$DEB" | awk '{print $NF}' > /tmp/paths.txt
+          cat /tmp/paths.txt
+          echo "=== 校验：不得出现 var/jb 前缀 ==="
+          if grep -q '^\./var/jb/' /tmp/paths.txt; then
+            echo "FAIL: 发现 var/jb 前缀，roothide 会判定 Not Updated"
+            grep '^\./var/jb/' /tmp/paths.txt
+            exit 1
+          fi
+          echo "OK: 无 var/jb 前缀"
+          echo "=== 校验：必须落在 Library/MobileSubstrate/DynamicLibraries ==="
+          if ! grep -q 'Library/MobileSubstrate/DynamicLibraries/RNAAlbum.dylib' /tmp/paths.txt; then
+            echo "FAIL: dylib 未落在标准注入目录"
+            exit 1
+          fi
+          echo "OK: 注入目录正确"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
