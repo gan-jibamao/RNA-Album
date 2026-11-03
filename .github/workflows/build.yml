@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.variant }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,6 +20,10 @@ jobs:
     name: Compile ${{ matrix.variant }}
     runs-on: macos-14
     timeout-minutes: 30
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.variant }}
+      cancel-in-progress: true
 
     strategy:
       fail-fast: false
