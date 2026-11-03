@@ -1,8 +1,8 @@
 Package: com.rna.album12123
 Name: RNA-Album (12123 相机相册入口)
-Version: 6.0.0
+Version: 7.0.0
 Architecture: iphoneos-arm64
-Description: 交管12123 一键挪车拍照页相册入口。v6 移除高层级 UIWindow（曾导致相机无法打开），诊断改走剪贴板静默复制。
+Description: 交管12123 一键挪车拍照页相册入口。v7 直接 hook UIImagePickerController 本体，修复子类覆盖导致 hook 失效。
 Maintainer: RNA
 Author: RNA
 Section: Tweaks

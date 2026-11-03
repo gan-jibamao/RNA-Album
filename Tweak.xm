@@ -1,14 +1,15 @@
-// RNA-Album v6
-// 修复: v4/v5 创建了 UIWindowLevelStatusBar+200 的高层级窗口，抢走 keyWindow
-//       导致 UIImagePickerController 无法 present，相机打不开。
-// 本版: 完全移除 UIWindow，诊断改走剪贴板 + 文件日志，零 UI 侵入。
+// RNA-Album v7
+// v6 修复了相机打不开(移除 UIWindow)，但存在 hook 覆盖漏洞:
+//   UIImagePickerController 自己实现了 viewDidAppear:，hook 父类 UIViewController 拦不到。
+// v7: 直接 hook UIImagePickerController 的 viewWillAppear/viewDidAppear/viewDidLayoutSubviews
+//     并保留 UIViewController 兜底；同时在 %ctor 落一个标记文件，便于确认加载。
 
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
-#define RNA_BTN_TAG   0x52A6
-#define RNA_ALBUM_KEY "rna_album_helper_v6"
+#define RNA_BTN_TAG   0x52A7
+#define RNA_ALBUM_KEY "rna_album_helper_v7"
 #define RNA_LOG(fmt, ...) RNALog(fmt, ##__VA_ARGS__)
 
 #pragma mark - 日志
@@ -34,6 +35,10 @@ static NSString *RNALogPath(void) {
     return p;
 }
 
+static NSString *RNAMarkerPath(void) {
+    return @"/var/mobile/Documents/rna_album_loaded.txt";
+}
+
 static void RNALog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -45,7 +50,7 @@ static void RNALog(NSString *fmt, ...) {
         if (!gRNALines) gRNALines = [NSMutableArray array];
         NSString *line = [NSString stringWithFormat:@"%@ %@", [NSDate date], msg];
         [gRNALines addObject:line];
-        if (gRNALines.count > 500) [gRNALines removeObjectAtIndex:0];
+        if (gRNALines.count > 600) [gRNALines removeObjectAtIndex:0];
 
         NSString *path = RNALogPath();
         NSFileManager *fm = [NSFileManager defaultManager];
@@ -61,37 +66,29 @@ static void RNALog(NSString *fmt, ...) {
     } @catch (__unused NSException *e) {}
 }
 
-#pragma mark - 诊断报告
+#pragma mark - 诊断
 
 static NSString *RNABuildReport(void) {
     NSMutableString *s = [NSMutableString string];
-    [s appendString:@"=== RNA-Album v6 诊断 ===\n"];
+    [s appendString:@"=== RNA-Album v7 诊断 ===\n"];
     [s appendFormat:@"bundle : %@\n", [[NSBundle mainBundle] bundleIdentifier]];
     [s appendFormat:@"iOS    : %@\n", [[UIDevice currentDevice] systemVersion]];
     [s appendFormat:@"日志   : %@\n", RNALogPath()];
-    [s appendString:@"\n--- 模块加载 ---\n"];
-    [s appendString:@"dylib 已载入 (arm64)\n"];
     [s appendString:@"\n--- 见过的页面类 ---\n"];
-    if (gRNASeen.count == 0) {
-        [s appendString:@"(无)\n"];
-    } else {
-        for (NSString *n in gRNASeen) [s appendFormat:@"%@\n", n];
-    }
+    if (gRNASeen.count == 0) [s appendString:@"(无)\n"];
+    else for (NSString *n in gRNASeen) [s appendFormat:@"%@\n", n];
     [s appendString:@"\n--- 日志尾部 ---\n"];
     NSInteger from = MAX(0, (NSInteger)gRNALines.count - 80);
-    for (NSInteger i = from; i < (NSInteger)gRNALines.count; i++) {
+    for (NSInteger i = from; i < (NSInteger)gRNALines.count; i++)
         [s appendFormat:@"%@\n", gRNALines[i]];
-    }
     return s;
 }
 
-// 静默复制诊断到剪贴板 —— 不弹任何 UI
 static void RNACopyReportIfNeeded(NSString *reason) {
     @try {
         if (!gRNACopied) gRNACopied = [NSMutableSet set];
         if ([gRNACopied containsObject:reason]) return;
         [gRNACopied addObject:reason];
-
         NSString *rep = RNABuildReport();
         [UIPasteboard generalPasteboard].string = rep;
         RNALog(@"诊断已复制到剪贴板 (触发: %@, %lu 字符)", reason, (unsigned long)rep.length);
@@ -110,7 +107,6 @@ static void RNACopyReportIfNeeded(NSString *reason) {
     didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)) {
     [pk dismissViewControllerAnimated:YES completion:nil];
     if (results.count == 0) { RNA_LOG(@"用户取消选择"); return; }
-
     PHPickerResult *r = results.firstObject;
     if (![r.itemProvider canLoadObjectOfClass:[UIImage class]]) {
         RNA_LOG(@"itemProvider 不支持 UIImage"); return;
@@ -160,7 +156,7 @@ static void RNACopyReportIfNeeded(NSString *reason) {
         [host dismissViewControllerAnimated:YES completion:nil];
         return;
     }
-    RNA_LOG(@"回传失败 host=%@ 无匹配通道", NSStringFromClass([host class]));
+    RNA_LOG(@"回传失败 host=%@", NSStringFromClass([host class]));
   } @catch (NSException *e) {
     RNA_LOG(@"回传异常: %@", e.reason);
   }
@@ -168,26 +164,20 @@ static void RNACopyReportIfNeeded(NSString *reason) {
 
 @end
 
-#pragma mark - 相册按钮
+#pragma mark - 按钮
 
-static BOOL RNALooksLikeCamera(UIViewController *vc) {
-    if (!vc || !vc.isViewLoaded) return NO;
-    NSString *n = NSStringFromClass([vc class]);
-    if ([n containsString:@"Camera"] || [n containsString:@"Capture"] ||
-        [n containsString:@"Take"]   || [n containsString:@"Shot"]) {
-        return YES;
-    }
-    if ([vc isKindOfClass:[UIImagePickerController class]]) {
-        return ((UIImagePickerController *)vc).sourceType
-                == UIImagePickerControllerSourceTypeCamera;
-    }
-    return NO;
-}
-
-static void RNAInstallAlbumButton(UIViewController *vc) {
+static void RNAInstallAlbumButton(UIViewController *vc, const char *from) {
   @try {
-    if (!RNALooksLikeCamera(vc)) return;
+    if (!vc || !vc.isViewLoaded) return;
     if ([vc.view viewWithTag:RNA_BTN_TAG]) return;
+
+    // 仅对相机界面注入
+    BOOL isCamera = [vc isKindOfClass:[UIImagePickerController class]] &&
+        ((UIImagePickerController *)vc).sourceType == UIImagePickerControllerSourceTypeCamera;
+    if (!isCamera) {
+        NSString *n = NSStringFromClass([vc class]);
+        if (!([n containsString:@"Camera"] || [n containsString:@"Capture"])) return;
+    }
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     btn.tag = RNA_BTN_TAG;
@@ -200,6 +190,7 @@ static void RNAInstallAlbumButton(UIViewController *vc) {
     btn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
     btn.translatesAutoresizingMaskIntoConstraints = NO;
     [vc.view addSubview:btn];
+    [vc.view bringSubviewToFront:btn];
 
     UILayoutGuide *g = vc.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -210,50 +201,47 @@ static void RNAInstallAlbumButton(UIViewController *vc) {
     ]];
     [btn addTarget:vc action:@selector(rna_tapAlbum:)
           forControlEvents:UIControlEventTouchUpInside];
-    RNA_LOG(@"★ 注入相册按钮 -> %@", NSStringFromClass([vc class]));
+
+    RNA_LOG(@"★ 注入相册按钮 -> %@ (from %s)", NSStringFromClass([vc class]), from);
   } @catch (NSException *e) {
-    RNA_LOG(@"注入按钮异常: %@", e.reason);
+    RNA_LOG(@"注入异常: %@", e.reason);
   }
 }
 
-#pragma mark - 加载探针（不创建任何窗口）
+#pragma mark - 加载探针
 
 %ctor {
     @autoreleasepool {
-        RNALog(@"=== dylib 已载入 v6 (arm64, 无窗口) ===");
+        RNALog(@"=== dylib 已载入 v7 (arm64) ===");
         RNALog(@"bundle=%@", [[NSBundle mainBundle] bundleIdentifier]);
         RNALog(@"进程=%@", [[NSProcessInfo processInfo] processName]);
         RNALog(@"iOS=%@", [[UIDevice currentDevice] systemVersion]);
         RNALog(@"日志=%@", RNALogPath());
+        @try {
+            NSString *m = [NSString stringWithFormat:@"v7 loaded at %@\n", [NSDate date]];
+            [m writeToFile:RNAMarkerPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } @catch (__unused NSException *e) {}
     }
 }
 
-#pragma mark - Hook
+#pragma mark - Hook: UIImagePickerController 本体（关键）
 
-%hook UIViewController
+%hook UIImagePickerController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    RNAInstallAlbumButton(self, "picker.viewWillAppear");
+}
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    @try {
-        NSString *n = NSStringFromClass([self class]);
+    RNAInstallAlbumButton(self, "picker.viewDidAppear");
+    RNACopyReportIfNeeded(@"picker 出现");
+}
 
-        BOOL interesting =
-            [n containsString:@"Camera"] || [n containsString:@"Capture"] ||
-            [n containsString:@"Photo"]  || [n containsString:@"Take"]    ||
-            [n containsString:@"Picker"] || [n containsString:@"Scan"]    ||
-            [n containsString:@"MoveCar"];
-
-        if (interesting) {
-            if (!gRNASeen) gRNASeen = [NSMutableArray array];
-            if (![gRNASeen containsObject:n]) {
-                [gRNASeen addObject:n];
-                RNA_LOG(@"页面出现: %@", n);
-                // 抓到一个疑似相机页 → 自动复制诊断，供直接粘贴
-                RNACopyReportIfNeeded([@"页面:" stringByAppendingString:n]);
-            }
-        }
-        RNAInstallAlbumButton(self);
-    } @catch (__unused NSException *e) {}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    RNAInstallAlbumButton(self, "picker.viewDidLayoutSubviews");
 }
 
 %new
@@ -274,6 +262,29 @@ static void RNAInstallAlbumButton(UIViewController *vc) {
   } @catch (NSException *e) {
     RNA_LOG(@"打开相册异常: %@", e.reason);
   }
+}
+
+%end
+
+#pragma mark - Hook: UIViewController 兜底
+
+%hook UIViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    @try {
+        NSString *n = NSStringFromClass([self class]);
+        if ([n containsString:@"Camera"] || [n containsString:@"Capture"] ||
+            [n containsString:@"Take"]   || [n containsString:@"Picker"]) {
+            if (!gRNASeen) gRNASeen = [NSMutableArray array];
+            if (![gRNASeen containsObject:n]) {
+                [gRNASeen addObject:n];
+                RNA_LOG(@"页面出现: %@", n);
+                RNACopyReportIfNeeded([@"页面:" stringByAppendingString:n]);
+            }
+        }
+        RNAInstallAlbumButton(self, "vc.viewDidAppear");
+    } @catch (__unused NSException *e) {}
 }
 
 %end
