@@ -67,7 +67,7 @@ static void *kRNAPickerKey = &kRNAPickerKey;
         return;
     }
 
-    __weak typeof(self) weakSelf = self;
+    __weak __typeof__(self) weakSelf = self;
     [r.itemProvider loadObjectOfClass:[UIImage class]
                     completionHandler:^(id<NSItemProviderReading> obj, NSError *err) {
         dispatch_async(dispatch_get_main_queue(), ^{
