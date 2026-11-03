@@ -92,10 +92,19 @@ jobs:
           set -euo pipefail
           DEB=$(ls packages/*.deb | head -1)
           BASE=$(basename "$DEB" .deb)
-          OUT="${BASE}${{ matrix.suffix }}.deb"
-          cp "$DEB" "packages/$OUT"
+          SUFFIX="${{ matrix.suffix }}"
+          OUT="${BASE}${SUFFIX}.deb"
+          if [ "$OUT" != "$(basename "$DEB")" ]; then
+            cp "$DEB" "packages/$OUT"
+            echo "renamed: $(basename "$DEB") -> $OUT"
+          else
+            echo "no suffix, keeping: $OUT"
+          fi
+          # 只保留目标文件，其余删除，避免 release 阶段重复上传
+          find packages -maxdepth 1 -name '*.deb' ! -name "$OUT" -delete
+          ls -lh packages/
+          test -f "packages/$OUT"
           echo "ARTIFACT=packages/$OUT" >> "$GITHUB_ENV"
-          echo "renamed -> $OUT"
 
       - name: Verify package
         run: |
