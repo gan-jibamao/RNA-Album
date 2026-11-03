@@ -1,6 +1,6 @@
 Package: com.rna.album12123
 Name: RNA-Album (12123 相机相册入口)
-Version: 1.0.0
+Version: 2.0.0
 Architecture: iphoneos-arm64
 Description: 在交管12123「一键挪车」拍照界面叠加相册入口，复用 App 自身 takePhotoBlock 回传，不修改上传与业务逻辑。
 Maintainer: RNA

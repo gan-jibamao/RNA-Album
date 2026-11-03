@@ -18,7 +18,7 @@ endif
 
 TWEAK_NAME = RNAAlbum
 RNAAlbum_FILES = Tweak.xm
-RNAAlbum_CFLAGS = -fobjc-arc -std=c++11 -Wno-deprecated-declarations
+RNAAlbum_CFLAGS = -fobjc-arc -std=c++11 -Wno-deprecated-declarations -Wno-objc-multiple-method-names
 RNAAlbum_FRAMEWORKS = UIKit PhotosUI Photos
 RNAAlbum_PRIVATE_FRAMEWORKS =
 

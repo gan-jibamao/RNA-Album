@@ -1,65 +1,32 @@
-// RNA-Album : 12123 相机界面注入「相册」入口
-// 作用域: com.tmri.12123  /  TmriCameraViewController
-// 复用 App 自己的 takePhotoBlock 回传，不触碰任何上传/校验逻辑
+// RNA-Album v2
+// 目标: 交管12123 一键挪车拍照界面 (系统 UIImagePickerController camera 模式)
+// 思路: hook 系统类，叠加相册按钮；选图后冒充系统相机回调 App 的 delegate
+// 不触碰任何上传/校验逻辑
 
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
-#define RNA_BTN_TAG   0x52A1
+#define RNA_BTN_TAG   0x52A2
+#define RNA_ALBUM_KEY "rna_album_helper"
+
 #define RNA_LOG(fmt, ...) NSLog(@"[RNA-Album] " fmt, ##__VA_ARGS__)
 
-static void *kRNAPickerKey = &kRNAPickerKey;
+#pragma mark - 选图助手
 
-#pragma mark - 原类声明（属性来自二进制字符串表）
-
-@interface TmriCameraViewController : UIViewController
-// T@?,C,N,V_takePhotoBlock  —— copy block
-@property (nonatomic, copy) id takePhotoBlock;
+@interface RNAAlbumHelper : NSObject <PHPickerViewControllerDelegate>
+@property (nonatomic, weak) UIImagePickerController *host;
 @end
 
-#pragma mark - 相册选择代理
+@implementation RNAAlbumHelper
 
-@interface RNAAlbumPicker : NSObject
-    <PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
-@property (nonatomic, weak) UIViewController *host;
-@end
-
-@implementation RNAAlbumPicker
-
-// 唯一的回传出口：对齐 v32@?0@"UIImage"8@"UIImage"16@"NSDictionary"24
-- (void)deliverImage:(UIImage *)img {
-    UIViewController *host = self.host;
-    if (!img || !host) {
-        RNA_LOG(@"deliver 失败: img=%p host=%p", img, host);
-        return;
-    }
-
-    id block = nil;
-    @try {
-        block = [host valueForKey:@"takePhotoBlock"];
-    } @catch (__unused NSException *e) {
-        RNA_LOG(@"takePhotoBlock 取值异常: %@", e.reason);
-    }
-
-    if (!block) {
-        RNA_LOG(@"takePhotoBlock 为空，无法回传（该页可能不是 TmriCamera）");
-        return;
-    }
-
-    void (^cb)(UIImage *, UIImage *, NSDictionary *) =
-        (void (^)(UIImage *, UIImage *, NSDictionary *))block;
-
-    RNA_LOG(@"回传相册图 size=%.0fx%.0f", img.size.width, img.size.height);
-    cb(img, img, @{});
-}
-
-#pragma mark PHPicker (iOS 14+)
-
-- (void)picker:(PHPickerViewController *)picker
+- (void)picker:(PHPickerViewController *)pk
     didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)) {
-    [picker dismissViewControllerAnimated:YES completion:nil];
-    if (results.count == 0) return;
+    [pk dismissViewControllerAnimated:YES completion:nil];
+    if (results.count == 0) {
+        RNA_LOG(@"用户取消选择");
+        return;
+    }
 
     PHPickerResult *r = results.firstObject;
     if (![r.itemProvider canLoadObjectOfClass:[UIImage class]]) {
@@ -72,63 +39,88 @@ static void *kRNAPickerKey = &kRNAPickerKey;
                     completionHandler:^(id<NSItemProviderReading> obj, NSError *err) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if ([obj isKindOfClass:[UIImage class]]) {
-                [weakSelf deliverImage:(UIImage *)obj];
+                [weakSelf deliver:(UIImage *)obj];
             } else {
-                RNA_LOG(@"load 失败: %@", err.localizedDescription);
+                RNA_LOG(@"加载图片失败: %@", err.localizedDescription);
             }
         });
     }];
 }
 
-#pragma mark UIImagePicker (iOS 13 及以下)
+// 冒充系统相机，交给 App 自己的 delegate
+- (void)deliver:(UIImage *)img {
+    UIImagePickerController *p = self.host;
+    if (!img || !p) {
+        RNA_LOG(@"回传失败 img=%p host=%p", img, p);
+        return;
+    }
 
-- (void)imagePickerController:(UIImagePickerController *)picker
-    didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
-    UIImage *img = info[UIImagePickerControllerOriginalImage];
-    [picker dismissViewControllerAnimated:YES completion:nil];
-    [self deliverImage:img];
-}
+    NSDictionary *info = @{
+        UIImagePickerControllerOriginalImage : img,
+        UIImagePickerControllerMediaType     : @"public.image",
+    };
 
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    [picker dismissViewControllerAnimated:YES completion:nil];
+    id<UIImagePickerControllerDelegate> d = p.delegate;
+    SEL sel = @selector(imagePickerController:didFinishPickingMediaWithInfo:);
+
+    RNA_LOG(@"回传相册图 %.0fx%.0f -> delegate=%@",
+            img.size.width, img.size.height, NSStringFromClass([d class]));
+
+    if (d && [d respondsToSelector:sel]) {
+        [d imagePickerController:p didFinishPickingMediaWithInfo:info];
+    } else {
+        RNA_LOG(@"delegate 不响应拍照回调，尝试直接关闭");
+    }
+
+    // App 若未自行关闭，兜底关掉，避免卡在相机页
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (p.presentingViewController || p.presentedViewController) {
+            [p dismissViewControllerAnimated:YES completion:nil];
+        }
+    });
 }
 
 @end
 
-#pragma mark - 按钮注入
+#pragma mark - 按钮
 
-static void RNAInstallAlbumButton(UIViewController *vc) {
-    if (!vc || !vc.isViewLoaded) return;
-    if ([vc.view viewWithTag:RNA_BTN_TAG]) return;   // 幂等
+static void RNAInstallAlbumButton(UIImagePickerController *picker) {
+    if (!picker || !picker.isViewLoaded) return;
+    if (picker.sourceType != UIImagePickerControllerSourceTypeCamera) return;
+    if ([picker.view viewWithTag:RNA_BTN_TAG]) return;
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     btn.tag = RNA_BTN_TAG;
     [btn setTitle:@"相册" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    btn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    btn.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
-    btn.layer.cornerRadius = 22.0;
+    btn.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.5];
+    btn.layer.cornerRadius = 21.0;
     btn.layer.borderWidth = 1.0;
-    btn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    btn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.4].CGColor;
     btn.translatesAutoresizingMaskIntoConstraints = NO;
 
-    [vc.view addSubview:btn];
+    [picker.view addSubview:btn];
 
-    UILayoutGuide *g = vc.view.safeAreaLayoutGuide;
+    UILayoutGuide *g = picker.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [btn.leadingAnchor  constraintEqualToAnchor:g.leadingAnchor constant:20.0],
-        [btn.bottomAnchor   constraintEqualToAnchor:g.bottomAnchor  constant:-130.0],
-        [btn.widthAnchor    constraintEqualToConstant:64.0],
-        [btn.heightAnchor   constraintEqualToConstant:44.0],
+        [btn.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16.0],
+        [btn.topAnchor      constraintEqualToAnchor:g.topAnchor      constant:14.0],
+        [btn.widthAnchor    constraintEqualToConstant:66.0],
+        [btn.heightAnchor   constraintEqualToConstant:42.0],
     ]];
 
-    [btn addTarget:vc action:@selector(rna_openAlbum:) forControlEvents:UIControlEventTouchUpInside];
-    RNA_LOG(@"相册按钮已注入 %@", NSStringFromClass([vc class]));
+    [btn addTarget:picker
+            action:@selector(rna_tapAlbum:)
+  forControlEvents:UIControlEventTouchUpInside];
+
+    RNA_LOG(@"相册按钮已注入 (sourceType=%ld)", (long)picker.sourceType);
 }
 
 #pragma mark - Hook
 
-%hook TmriCameraViewController
+%hook UIImagePickerController
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -136,26 +128,22 @@ static void RNAInstallAlbumButton(UIViewController *vc) {
 }
 
 %new
-- (void)rna_openAlbum:(UIButton *)sender {
-    RNAAlbumPicker *p = [RNAAlbumPicker new];
-    p.host = self;
-    // 选择器代理必须强持有，否则 present 后立刻释放
-    objc_setAssociatedObject(self, kRNAPickerKey, p, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+- (void)rna_tapAlbum:(UIButton *)sender {
+    RNAAlbumHelper *h = [[RNAAlbumHelper alloc] init];
+    h.host = self;
+    objc_setAssociatedObject(self, RNA_ALBUM_KEY, h, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     if (@available(iOS 14.0, *)) {
         PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
         cfg.filter = PHPickerFilter.imagesFilter;
         cfg.selectionLimit = 1;
         PHPickerViewController *pk = [[PHPickerViewController alloc] initWithConfiguration:cfg];
-        pk.delegate = p;
+        pk.delegate = h;
         [self presentViewController:pk animated:YES completion:nil];
+        RNA_LOG(@"打开系统相册选择器");
     } else {
-        UIImagePickerController *ip = [UIImagePickerController new];
-        ip.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-        ip.delegate = p;
-        [self presentViewController:ip animated:YES completion:nil];
+        RNA_LOG(@"iOS 14 以下不支持 PHPicker");
     }
-    RNA_LOG(@"打开相册选择器");
 }
 
 %end
