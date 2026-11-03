@@ -1,15 +1,13 @@
 export TARGET = iphone:clang:latest:14.0
 
-# 允许命令行覆盖: make ARCHS=arm64e / make ARCHS="arm64 arm64e"
+# 12123 是 App Store 应用，主程序为 THIN arm64
+# 因此默认只编 arm64 —— 纯 arm64e 的 dylib 根本加载不进 arm64 进程
 ifeq ($(strip $(ARCHS)),)
-export ARCHS = arm64 arm64e
+export ARCHS = arm64
 else
 export ARCHS := $(strip $(ARCHS))
 endif
 
-# roothide: 越狱根为随机 jbroot，包内不得带 /var/jb 前缀
-# rootless: 传统 /var/jb 布局
-# 需要旧布局时: make THEOS_PACKAGE_SCHEME=rootless
 ifeq ($(strip $(THEOS_PACKAGE_SCHEME)),)
 export THEOS_PACKAGE_SCHEME = roothide
 else
@@ -18,9 +16,8 @@ endif
 
 TWEAK_NAME = RNAAlbum
 RNAAlbum_FILES = Tweak.xm
-RNAAlbum_CFLAGS = -fobjc-arc -std=c++11 -Wno-deprecated-declarations -Wno-objc-multiple-method-names
+RNAAlbum_CFLAGS = -fobjc-arc -std=c++11 -Wno-deprecated-declarations
 RNAAlbum_FRAMEWORKS = UIKit PhotosUI Photos
-RNAAlbum_PRIVATE_FRAMEWORKS =
 
 include $(THEOS)/makefiles/common.mk
 include $(THEOS_MAKE_PATH)/tweak.mk

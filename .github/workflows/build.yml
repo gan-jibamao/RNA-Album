@@ -29,12 +29,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - variant: arm64
+            archs: "arm64"
+            suffix: ""
           - variant: universal
             archs: "arm64 arm64e"
-            suffix: ""
-          - variant: arm64e
-            archs: "arm64e"
-            suffix: "e"
+            suffix: "u"
 
     steps:
       - name: Checkout
@@ -185,13 +185,42 @@ jobs:
           PY
           )
           echo "arch count in dylib: $COUNT"
-          if [ "${{ matrix.variant }}" = "arm64e" ]; then
-            [ "$COUNT" = "1" ] || { echo "FAIL: arm64e variant must be thin"; exit 1; }
-            echo "OK: thin arm64e"
+          if [ "${{ matrix.variant }}" = "arm64" ]; then
+            [ "$COUNT" = "1" ] || { echo "FAIL: arm64 variant must be thin"; exit 1; }
+            echo "OK: thin arm64"
           else
             [ "$COUNT" = "2" ] || { echo "FAIL: universal variant must be fat with 2 archs"; exit 1; }
             echo "OK: fat dual-arch"
           fi
+
+      - name: Assert has arm64 slice
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/z && mkdir -p /tmp/z
+          dpkg-deb -x "$ARTIFACT" /tmp/z
+          DYLIB=$(find /tmp/z -name '*.dylib' | head -1)
+          echo "checking $DYLIB"
+          python3 - "$DYLIB" <<'PYEOF'
+          import struct, sys
+          b = open(sys.argv[1], "rb").read()
+          magic = struct.unpack_from(">I", b, 0)[0]
+          names = []
+          if magic == 0xcafebabe:
+              n = struct.unpack_from(">I", b, 4)[0]
+              for i in range(n):
+                  cpu, sub = struct.unpack_from(">ii", b, 8 + i * 20)
+                  if cpu == 0x0100000c:
+                      names.append("arm64e" if (sub & 2) else "arm64")
+          else:
+              cpu, sub = struct.unpack_from("<ii", b, 4)
+              if cpu == 0x0100000c:
+                  names.append("arm64e" if (sub & 2) else "arm64")
+          print("slices:", names)
+          if "arm64" not in names:
+              print("FATAL: dylib has no arm64 slice; 12123 main binary is thin arm64")
+              sys.exit(1)
+          print("OK: arm64 slice present")
+          PYEOF
 
       - name: Assert roothide layout
         run: |
