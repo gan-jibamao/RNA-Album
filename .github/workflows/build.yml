@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.variant }}
   cancel-in-progress: true
 
 permissions:
@@ -17,9 +17,20 @@ permissions:
 
 jobs:
   build:
-    name: Compile & Package
+    name: Compile ${{ matrix.variant }}
     runs-on: macos-14
     timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: universal
+            archs: "arm64 arm64e"
+            suffix: ""
+          - variant: arm64e
+            archs: "arm64e"
+            suffix: "e"
 
     steps:
       - name: Checkout
@@ -30,6 +41,8 @@ jobs:
           sw_vers
           xcode-select -p || true
           uname -m
+          echo "VARIANT=${{ matrix.variant }}"
+          echo "ARCHS=${{ matrix.archs }}"
 
       - name: Install Theos
         run: |
@@ -62,35 +75,98 @@ jobs:
         run: |
           set -euo pipefail
           make clean || true
-          make 2>&1 | tee build.log
+          make ARCHS="${{ matrix.archs }}" 2>&1 | tee build-${{ matrix.variant }}.log
 
       - name: Package
         run: |
           set -euo pipefail
-          make package FINALPACKAGE=1 2>&1 | tee package.log
+          make package ARCHS="${{ matrix.archs }}" FINALPACKAGE=1 2>&1 | tee package-${{ matrix.variant }}.log
           ls -lh packages/
+
+      - name: Rename artifact
+        run: |
+          set -euo pipefail
+          DEB=$(ls packages/*.deb | head -1)
+          BASE=$(basename "$DEB" .deb)
+          OUT="${BASE}${{ matrix.suffix }}.deb"
+          cp "$DEB" "packages/$OUT"
+          echo "ARTIFACT=packages/$OUT" >> "$GITHUB_ENV"
+          echo "renamed -> $OUT"
 
       - name: Verify package
         run: |
           set -euo pipefail
-          DEB=$(ls packages/*.deb | head -1)
-          echo "DEB=$DEB"
-          echo "=== arch ==="
-          dpkg-deb -f "$DEB" Architecture
+          DEB="$ARTIFACT"
+          echo "=== file: $DEB ==="
+          ls -lh "$DEB"
+          echo "=== control fields ==="
           dpkg-deb -f "$DEB" Package
           dpkg-deb -f "$DEB" Version
+          dpkg-deb -f "$DEB" Architecture
           echo "=== contents ==="
           dpkg-deb -c "$DEB"
-          echo "=== dylib archs ==="
+          echo "=== dylib archs (must match declared archs) ==="
           rm -rf /tmp/x && mkdir -p /tmp/x
           dpkg-deb -x "$DEB" /tmp/x
-          find /tmp/x -name '*.dylib' -exec file {} \;
+          for f in $(find /tmp/x -name '*.dylib'); do
+            python3 - "$f" <<'PY'
+          import struct, sys
+          p = sys.argv[1]
+          b = open(p, "rb").read()
+          magic = struct.unpack_from(">I", b, 0)[0]
+          if magic in (0xcafebabe, 0xcafebabf):
+              n = struct.unpack_from(">I", b, 4)[0]
+              print("  FAT with %d archs:" % n)
+              for i in range(n):
+                  if magic == 0xcafebabe:
+                      cpu, sub = struct.unpack_from(">ii", b, 8 + i * 20)
+                  else:
+                      cpu, sub = struct.unpack_from(">ii", b, 8 + i * 32)
+                  if cpu == 0x100000c:
+                      name = "arm64e" if (sub & 0x2) else "arm64"
+                  else:
+                      name = hex(cpu)
+                  print("    - %s" % name)
+          elif magic == 0xfeedfacf:
+              print("  thin arm64/arm64e (LE header)")
+          elif magic == 0xcffaedfe:
+              print("  thin (BE header, unexpected on iOS)")
+          else:
+              print("  magic=%#x" % magic)
+          PY
+          done
+
+      - name: Assert arch matches variant
+        run: |
+          set -euo pipefail
+          DEB="$ARTIFACT"
+          rm -rf /tmp/y && mkdir -p /tmp/y
+          dpkg-deb -x "$DEB" /tmp/y
+          DYLIB=$(find /tmp/y -name '*.dylib' | head -1)
+          COUNT=$(python3 - "$DYLIB" <<'PY'
+          import struct, sys
+          b = open(sys.argv[1], "rb").read()
+          magic = struct.unpack_from(">I", b, 0)[0]
+          if magic == 0xcafebabe:
+              print(struct.unpack_from(">I", b, 4)[0])
+          else:
+              print(1)
+          PY
+          )
+          echo "arch count in dylib: $COUNT"
+          if [ "${{ matrix.variant }}" = "arm64e" ]; then
+            [ "$COUNT" = "1" ] || { echo "FAIL: arm64e variant must be thin"; exit 1; }
+            echo "OK: thin arm64e"
+          else
+            [ "$COUNT" = "2" ] || { echo "FAIL: universal variant must be fat with 2 archs"; exit 1; }
+            echo "OK: fat dual-arch"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deb-${{ github.sha }}
-          path: packages/*.deb
+          name: deb-${{ matrix.variant }}-${{ github.sha }}
+          path: ${{ env.ARTIFACT }}
           if-no-files-found: error
           retention-days: 30
 
@@ -98,17 +174,32 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ github.sha }}
+          name: logs-${{ matrix.variant }}-${{ github.sha }}
           path: |
-            build.log
-            package.log
+            build-${{ matrix.variant }}.log
+            package-${{ matrix.variant }}.log
           if-no-files-found: ignore
 
-      - name: Publish to Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: List
+        run: ls -lh artifacts/
+
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          files: packages/*.deb
+          files: artifacts/*.deb
           generate_release_notes: true
           draft: false
           prerelease: false

@@ -1,5 +1,13 @@
 export TARGET = iphone:clang:latest:14.0
+
+# 允许命令行覆盖: make ARCHS=arm64e / make ARCHS="arm64 arm64e"
+# 不传时默认双架构
+ifeq ($(strip $(ARCHS)),)
 export ARCHS = arm64 arm64e
+else
+export ARCHS := $(strip $(ARCHS))
+endif
+
 export THEOS_PACKAGE_SCHEME = rootless
 
 TWEAK_NAME = RNAAlbum
