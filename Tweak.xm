@@ -323,11 +323,6 @@ static void RNAInstallAlbumButton(UIViewController *vc, const char *from) {
 
 %new
 - (void)rna_tapAlbum:(UIButton *)sender {
-    [self rna_presentAlbum];
-}
-
-%new
-- (void)rna_presentAlbum {
   @try {
     RNAAlbumHelper *h = [[RNAAlbumHelper alloc] init];
     h.host = self;
@@ -339,7 +334,7 @@ static void RNAInstallAlbumButton(UIViewController *vc, const char *from) {
         PHPickerViewController *pk = [[PHPickerViewController alloc] initWithConfiguration:cfg];
         pk.delegate = h;
         [self presentViewController:pk animated:YES completion:nil];
-        RNA_LOG(@"打开相册 host=%@", NSStringFromClass([self class]));
+        RNA_LOG(@"打开相册(picker) host=%@", NSStringFromClass([self class]));
     }
   } @catch (NSException *e) {
     RNA_LOG(@"打开相册异常: %@", e.reason);
@@ -380,11 +375,6 @@ static void RNAInstallAlbumButton(UIViewController *vc, const char *from) {
 
 %new
 - (void)rna_tapAlbum:(UIButton *)sender {
-    [self rna_presentAlbumGeneric];
-}
-
-%new
-- (void)rna_presentAlbumGeneric {
   @try {
     RNAAlbumHelper *h = [[RNAAlbumHelper alloc] init];
     h.host = self;
